@@ -1,3 +1,4 @@
+
 # -*- Mode:Python; indent-tabs-mode:nil; tab-width:4 -*-
 #
 # Copyright (C) 2016 Canonical Ltd
@@ -14,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import contextlib
 import hashlib
 import itertools
 import json
@@ -89,11 +91,20 @@ class Client():
         self.conf = conf
         self.root_url = root_url
         self.session = requests.Session()
+        self._snapcraft_headers = {
+            'X-SNAPCRAFT-VERSION': snapcraft.__version__
+        }
 
     def request(self, method, url, params=None, headers=None, **kwargs):
         """Overriding base class to handle the root url."""
         # Note that url may be absolute in which case 'root_url' is ignored by
         # urljoin.
+
+        if headers:
+            headers.update(self._snapcraft_headers)
+        else:
+            headers = self._snapcraft_headers
+
         final_url = urllib.parse.urljoin(self.root_url, url)
         response = self.session.request(
             method, final_url, headers=headers,
@@ -122,13 +133,13 @@ class StoreClient():
         self.sca = SCAClient(self.conf)
 
     def login(self, email, password, one_time_password=None, acls=None,
-              save=True):
+              packages=None, channels=None, save=True):
         """Log in via the Ubuntu One SSO API."""
         if acls is None:
             acls = ['package_upload', 'package_access']
         # Ask the store for the needed capabilities to be associated with the
         # macaroon.
-        macaroon = self.sca.get_macaroon(acls)
+        macaroon = self.sca.get_macaroon(acls, packages, channels)
         caveat_id = self._extract_caveat_id(macaroon)
         unbound_discharge = self.sso.get_unbound_discharge(
             email, password, one_time_password, caveat_id)
@@ -173,6 +184,10 @@ class StoreClient():
     def register(self, snap_name, is_private=False):
         return self._refresh_if_necessary(
             self.sca.register, snap_name, is_private, constants.DEFAULT_SERIES)
+
+    def push_precheck(self, snap_name):
+        return self._refresh_if_necessary(
+            self.sca.snap_push_precheck, snap_name)
 
     def push_snap_build(self, snap_id, snap_build):
         return self._refresh_if_necessary(
@@ -241,7 +256,7 @@ class StoreClient():
         package = self.cpi.get_package(snap_name, channel, arch)
         self._download_snap(
             snap_name, channel, arch, download_path,
-            package['download_url'], package['download_sha512'])
+            package['anon_download_url'], package['download_sha512'])
 
     def _download_snap(self, name, channel, arch, download_path,
                        download_url, expected_sha512):
@@ -276,6 +291,9 @@ class StoreClient():
 
     def get_validations(self, snap_id):
         return self.sca.get_validations(snap_id)
+
+    def sign_developer_agreement(self, latest_tos_accepted=False):
+        return self.sca.sign_developer_agreement(latest_tos_accepted)
 
 
 class SSOClient(Client):
@@ -341,17 +359,38 @@ class SnapIndexClient(Client):
             'UBUNTU_STORE_SEARCH_ROOT_URL',
             constants.UBUNTU_STORE_SEARCH_ROOT_URL))
 
+    def get_default_headers(self):
+        """Return default headers for CPI requests.
+
+        Tries to build an 'Authorization' header with local credentials
+        if they are available.
+        Also pin specific branded store if `SNAPCRAFT_UBUNTU_STORE`
+        environment is set.
+        """
+        headers = {}
+
+        with contextlib.suppress(errors.InvalidCredentialsError):
+            headers['Authorization'] = _macaroon_auth(self.conf)
+
+        branded_store = os.getenv('SNAPCRAFT_UBUNTU_STORE')
+        if branded_store:
+            headers['X-Ubuntu-Store'] = branded_store
+
+        return headers
+
     def get_package(self, snap_name, channel, arch=None):
-        headers = {
+        headers = self.get_default_headers()
+        headers.update({
             'Accept': 'application/hal+json',
             'X-Ubuntu-Release': constants.DEFAULT_SERIES,
-        }
+        })
         if arch:
             headers['X-Ubuntu-Architecture'] = arch
 
         params = {
             'channel': channel,
-            'fields': 'status,download_url,download_sha512,snap_id,release',
+            'fields': 'status,anon_download_url,download_url,'
+                      'download_sha512,snap_id,release',
         }
         logger.info('Getting details for {}'.format(snap_name))
         url = 'api/v1/snaps/details/{}'.format(snap_name)
@@ -362,8 +401,7 @@ class SnapIndexClient(Client):
 
     def get(self, url, headers=None, params=None, stream=False):
         if headers is None:
-            headers = {}
-        headers.update({'Authorization': _macaroon_auth(self.conf)})
+            headers = self.get_default_headers()
         response = self.request('GET', url, stream=stream,
                                 headers=headers, params=params)
         return response
@@ -392,12 +430,23 @@ class SCAClient(Client):
             'UBUNTU_STORE_API_ROOT_URL',
             constants.UBUNTU_STORE_API_ROOT_URL))
 
-    def get_macaroon(self, acls):
+    def get_macaroon(self, acls, packages=None, channels=None):
+        data = {
+            'permissions': acls,
+        }
+        if packages is not None:
+            data.update({
+                'packages': packages,
+            })
+        if channels is not None:
+            data.update({
+                'channels': channels,
+            })
+        headers = {
+            'Accept': 'application/json',
+        }
         response = self.post(
-            'acl/',
-            data=json.dumps({'permissions': acls}),
-            headers={'Content-Type': 'application/json',
-                     'Accept': 'application/json'})
+            'acl/', json=data, headers=headers)
         if response.ok:
             return response.json()['macaroon']
         else:
@@ -448,6 +497,20 @@ class SCAClient(Client):
                      'Content-Type': 'application/json'})
         if not response.ok:
             raise errors.StoreRegistrationError(snap_name, response)
+
+    def snap_push_precheck(self, snap_name):
+        data = {
+            'name': snap_name,
+            'dry_run': True,
+        }
+        auth = _macaroon_auth(self.conf)
+        response = self.post(
+            'snap-push/', data=json.dumps(data),
+            headers={'Authorization': auth,
+                     'Content-Type': 'application/json',
+                     'Accept': 'application/json'})
+        if not response.ok:
+            raise errors.StorePushError(data['name'], response)
 
     def snap_push_metadata(self, snap_name, updown_data):
         data = {
@@ -608,6 +671,19 @@ class SCAClient(Client):
                 '{} {}\n{}'.format(response.status_code, response.reason,
                                    response.content))
             raise errors.StoreChannelClosingError(response)
+
+    def sign_developer_agreement(self, latest_tos_accepted=False):
+        auth = _macaroon_auth(self.conf)
+        data = {'latest_tos_accepted': latest_tos_accepted}
+        response = self.post(
+            'agreement/', data=json.dumps(data),
+            headers={'Authorization': auth,
+                     'Content-Type': 'application/json',
+                     'Accept': 'application/json'})
+
+        if not response.ok:
+            raise errors.DeveloperAgreementSignError(response)
+        return response.json()
 
 
 class StatusTracker:

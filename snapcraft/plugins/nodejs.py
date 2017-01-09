@@ -90,14 +90,19 @@ class NodePlugin(snapcraft.BasePlugin):
         if 'required' in schema:
             del schema['required']
 
+        return schema
+
+    @classmethod
+    def get_build_properties(cls):
         # Inform Snapcraft of the properties associated with building. If these
         # change in the YAML Snapcraft will consider the build step dirty.
-        schema['build-properties'].extend(['node-packages', 'npm-run'])
+        return ['node-packages', 'npm-run']
+
+    @classmethod
+    def get_pull_properties(cls):
         # Inform Snapcraft of the properties associated with pulling. If these
         # change in the YAML Snapcraft will consider the build step dirty.
-        schema['pull-properties'].append('node-engine')
-
-        return schema
+        return ['node-engine']
 
     def __init__(self, name, options, project):
         super().__init__(name, options, project)
@@ -110,7 +115,7 @@ class NodePlugin(snapcraft.BasePlugin):
         os.makedirs(self._npm_dir, exist_ok=True)
         self._nodejs_tar.download()
         # do the install in the pull phase to download all dependencies.
-        self._npm_install()
+        self._npm_install(rootdir=self.sourcedir)
 
     def clean_pull(self):
         super().clean_pull()
@@ -121,19 +126,19 @@ class NodePlugin(snapcraft.BasePlugin):
 
     def build(self):
         super().build()
-        self._npm_install()
+        self._npm_install(rootdir=self.builddir)
 
-    def _npm_install(self):
+    def _npm_install(self, rootdir):
         self._nodejs_tar.provision(
             self.installdir, clean_target=False, keep_tarball=True)
         npm_install = ['npm', '--cache-min=Infinity', 'install']
         for pkg in self.options.node_packages:
-            self.run(npm_install + ['--global'] + [pkg])
-        if os.path.exists(os.path.join(self.builddir, 'package.json')):
-            self.run(npm_install)
-            self.run(npm_install + ['--global'])
+            self.run(npm_install + ['--global'] + [pkg], cwd=rootdir)
+        if os.path.exists(os.path.join(rootdir, 'package.json')):
+            self.run(npm_install, cwd=rootdir)
+            self.run(npm_install + ['--global'], cwd=rootdir)
         for target in self.options.npm_run:
-            self.run(['npm', 'run', target])
+            self.run(['npm', 'run', target], cwd=rootdir)
 
 
 def _get_nodejs_base(node_engine):

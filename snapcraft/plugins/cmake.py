@@ -1,6 +1,6 @@
 # -*- Mode:Python; indent-tabs-mode:nil; tab-width:4 -*-
 #
-# Copyright (C) 2015 Canonical Ltd
+# Copyright (C) 2015, 2016 Canonical Ltd
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
@@ -51,11 +51,13 @@ class CMakePlugin(snapcraft.plugins.make.MakePlugin):
             'default': [],
         }
 
+        return schema
+
+    @classmethod
+    def get_build_properties(cls):
         # Inform Snapcraft of the properties associated with building. If these
         # change in the YAML Snapcraft will consider the build step dirty.
-        schema['build-properties'].append('configflags')
-
-        return schema
+        return super().get_build_properties() + ['configflags']
 
     def __init__(self, name, options, project):
         super().__init__(name, options, project)
@@ -77,10 +79,7 @@ class CMakePlugin(snapcraft.plugins.make.MakePlugin):
         self.run(['cmake', sourcedir, '-DCMAKE_INSTALL_PREFIX='] +
                  self.options.configflags, env=env)
 
-        self.run(['make', '-j{}'.format(
-            self.parallel_build_count)], env=env)
-
-        self.run(['make', 'install', 'DESTDIR=' + self.installdir], env=env)
+        self.make(env=env)
 
     def _build_environment(self):
         env = os.environ.copy()

@@ -33,7 +33,7 @@ Additionally, this plugin uses the following plugin-specific keywords:
 import glob
 import logging
 import os
-
+import urllib.parse
 import snapcraft
 import snapcraft.common
 import snapcraft.plugins.jdk
@@ -57,21 +57,25 @@ class GradlePlugin(snapcraft.plugins.jdk.JdkPlugin):
             'default': [],
         }
 
-        # Inform Snapcraft of the properties associated with building. If these
-        # change in the YAML Snapcraft will consider the build step dirty.
-        schema['build-properties'].append('gradle-options')
-
         return schema
 
     def __init__(self, name, options, project):
         super().__init__(name, options, project)
+        self.build_packages.append('ca-certificates-java')
+
+    @classmethod
+    def get_build_properties(cls):
+        # Inform Snapcraft of the properties associated with building. If these
+        # change in the YAML Snapcraft will consider the build step dirty.
+        return ['gradle-options']
 
     def build(self):
         super().build()
 
         gradle_cmd = ['./gradlew']
-
-        self.run(gradle_cmd + self.options.gradle_options + ['jar'])
+        self.run(gradle_cmd +
+                 self._get_proxy_options() +
+                 self.options.gradle_options + ['jar'])
 
         src = os.path.join(self.builddir, 'build', 'libs')
         jarfiles = glob.glob(os.path.join(src, '*.jar'))
@@ -91,3 +95,18 @@ class GradlePlugin(snapcraft.plugins.jdk.JdkPlugin):
         for f in jarfiles:
             base = os.path.basename(f)
             os.link(f, os.path.join(targetdir, base))
+
+    def _get_proxy_options(self):
+        # XXX This doesn't yet support username and password.
+        # -- elopio - 2016-11-17
+        proxy_options = []
+        for var in ('http', 'https'):
+            proxy = os.environ.get('{}_proxy'.format(var), False)
+            if proxy:
+                parsed_url = urllib.parse.urlparse(proxy)
+                proxy_options.append('-D{}.proxyHost={}'.format(
+                    var, parsed_url.hostname))
+                if parsed_url.port:
+                    proxy_options.append(
+                        '-D{}.proxyPort={}'.format(var, parsed_url.port))
+        return proxy_options

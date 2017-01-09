@@ -18,7 +18,6 @@ import contextlib
 import logging
 import os
 import shutil
-import sys
 import tarfile
 import time
 from subprocess import Popen, PIPE, STDOUT
@@ -36,6 +35,7 @@ from snapcraft.internal import (
     pluginhandler,
     repo,
 )
+from snapcraft.internal.indicators import is_dumb_terminal
 from snapcraft.internal.project_loader import replace_attr
 
 
@@ -132,8 +132,9 @@ class _Executor:
         for part in self.config.all_parts:
             steps_run[part.name] = set()
             for step in common.COMMAND_ORDER:
-                if part.is_dirty(step):
-                    self._handle_dirty(part, step)
+                dirty_report = part.get_dirty_report(step)
+                if dirty_report:
+                    self._handle_dirty(part, step, dirty_report)
                 elif not (part.should_step_run(step)):
                     steps_run[part.name].add(step)
                     part.notify_part_progress('Skipping {}'.format(step),
@@ -203,12 +204,36 @@ class _Executor:
                                        self.project_options.snap_dir,
                                        self.project_options.parts_dir)
 
-    def _handle_dirty(self, part, step):
+    def _handle_dirty(self, part, step, dirty_report):
         if step not in _STEPS_TO_AUTOMATICALLY_CLEAN_IF_DIRTY:
-            raise RuntimeError(
-                'The {0!r} step of {1!r} is out of date. Please clean that '
-                "part's {0!r} step in order to rebuild".format(
-                    step, part.name))
+            message_components = [
+                'The {!r} step of {!r} is out of date:\n\n'.format(
+                    step, part.name)]
+
+            if dirty_report.dirty_properties:
+                humanized_properties = formatting_utils.humanize_list(
+                    dirty_report.dirty_properties, 'and')
+                pluralized_connection = formatting_utils.pluralize(
+                    dirty_report.dirty_properties, 'property appears',
+                    'properties appear')
+                message_components.append(
+                    'The {} part {} to have changed.\n'.format(
+                        humanized_properties, pluralized_connection))
+
+            if dirty_report.dirty_project_options:
+                humanized_options = formatting_utils.humanize_list(
+                    dirty_report.dirty_project_options, 'and')
+                pluralized_connection = formatting_utils.pluralize(
+                    dirty_report.dirty_project_options, 'option appears',
+                    'options appear')
+                message_components.append(
+                    'The {} project {} to have changed.\n'.format(
+                        humanized_options, pluralized_connection))
+
+            message_components.append(
+                "\nPlease clean that part's {!r} step in order to "
+                'continue'.format(step))
+            raise RuntimeError(''.join(message_components))
 
         staged_state = self.config.get_project_state('stage')
         primed_state = self.config.get_project_state('prime')
@@ -225,13 +250,15 @@ class _Executor:
                         not dependent.is_clean('build')):
                     humanized_parts = formatting_utils.humanize_list(
                         dependents, 'and')
+                    pluralized_depends = formatting_utils.pluralize(
+                        dependents, "depends", "depend")
 
                     raise RuntimeError(
                         'The {0!r} step for {1!r} needs to be run again, but '
-                        '{2} depend{3} upon it. Please clean the build '
+                        '{2} {3} upon it. Please clean the build '
                         'step of {2} first.'.format(
                             step, part.name, humanized_parts,
-                            's' if len(dependents) == 1 else ''))
+                            pluralized_depends))
 
         part.clean(staged_state, primed_state, step, '(out of date)')
 
@@ -308,7 +335,10 @@ def snap(project_options, directory=None, output=None):
     with Popen(['mksquashfs', snap_dir, snap_name] + mksquashfs_args,
                stdout=PIPE, stderr=STDOUT) as proc:
         ret = None
-        if os.isatty(sys.stdout.fileno()):
+        if is_dumb_terminal():
+            logger.info('Snapping {!r} ...'.format(snap['name']))
+            ret = proc.wait()
+        else:
             message = '\033[0;32m\rSnapping {!r}\033[0;32m '.format(
                 snap['name'])
             progress_indicator = ProgressBar(
@@ -326,9 +356,6 @@ def snap(project_options, directory=None, output=None):
                 count += 1
                 time.sleep(.2)
                 ret = proc.poll()
-        else:
-            logger.info('Snapping {!r} ...'.format(snap['name']))
-            ret = proc.wait()
         print('')
         if ret != 0:
             logger.error(proc.stdout.read().decode('utf-8'))
@@ -403,10 +430,6 @@ def _remove_directory_if_empty(directory):
 
 
 def _cleanup_common_directories(config, project_options):
-    _remove_directory_if_empty(project_options.parts_dir)
-    _remove_directory_if_empty(project_options.stage_dir)
-    _remove_directory_if_empty(project_options.snap_dir)
-
     max_index = -1
     for part in config.all_parts:
         step = part.last_step()
@@ -415,31 +438,82 @@ def _cleanup_common_directories(config, project_options):
             if index > max_index:
                 max_index = index
 
-    # If no parts have been pulled, remove the parts directory. In most cases
-    # this directory should have already been cleaned, but this handles the
-    # case of a failed pull. Note however that the presence of local plugins
-    # should prevent this removal.
-    if (max_index < common.COMMAND_ORDER.index('pull') and
-            os.path.exists(project_options.parts_dir) and not
-            os.path.exists(project_options.local_plugins_dir)):
+    with contextlib.suppress(IndexError):
+        _cleanup_common_directories_for_step(
+            common.COMMAND_ORDER[max_index+1], project_options)
+
+
+def _cleanup_common_directories_for_step(step, project_options, parts=None):
+    if not parts:
+        parts = []
+
+    index = common.COMMAND_ORDER.index(step)
+
+    if index <= common.COMMAND_ORDER.index('prime'):
+        # Remove the priming area.
+        _cleanup_common(
+            project_options.snap_dir, 'prime', 'Cleaning up priming area',
+            parts)
+
+    if index <= common.COMMAND_ORDER.index('stage'):
+        # Remove the staging area.
+        _cleanup_common(
+            project_options.stage_dir, 'stage', 'Cleaning up staging area',
+            parts)
+
+    if index <= common.COMMAND_ORDER.index('pull'):
+        # Remove the parts directory (but leave local plugins alone).
+        _cleanup_parts_dir(
+            project_options.parts_dir, project_options.local_plugins_dir,
+            parts)
+
+    _remove_directory_if_empty(project_options.snap_dir)
+    _remove_directory_if_empty(project_options.stage_dir)
+    _remove_directory_if_empty(project_options.parts_dir)
+
+
+def _cleanup_common(directory, step, message, parts):
+    if os.path.isdir(directory):
+        logger.info(message)
+        shutil.rmtree(directory)
+    for part in parts:
+        part.mark_cleaned(step)
+
+
+def _cleanup_parts_dir(parts_dir, local_plugins_dir, parts):
+    if os.path.exists(parts_dir):
         logger.info('Cleaning up parts directory')
-        shutil.rmtree(project_options.parts_dir)
-
-    # If no parts have been staged, remove staging area.
-    should_remove_stagedir = max_index < common.COMMAND_ORDER.index('stage')
-    if should_remove_stagedir and os.path.exists(project_options.stage_dir):
-        logger.info('Cleaning up staging area')
-        shutil.rmtree(project_options.stage_dir)
-
-    # If no parts have been primed, remove snapping area.
-    should_remove_snapdir = max_index < common.COMMAND_ORDER.index('prime')
-    if should_remove_snapdir and os.path.exists(project_options.snap_dir):
-        logger.info('Cleaning up snapping area')
-        shutil.rmtree(project_options.snap_dir)
+        for subdirectory in os.listdir(parts_dir):
+            path = os.path.join(parts_dir, subdirectory)
+            if path != local_plugins_dir:
+                try:
+                    shutil.rmtree(path)
+                except NotADirectoryError:
+                    os.remove(path)
+    for part in parts:
+        part.mark_cleaned('build')
+        part.mark_cleaned('pull')
 
 
 def clean(project_options, parts, step=None):
+    # step defaults to None because that's how it comes from docopt when it's
+    # not set.
+    if not step:
+        step = 'pull'
+
+    if not parts and step == 'pull':
+        _cleanup_common_directories_for_step(step, project_options)
+        return
+
     config = snapcraft.internal.load_config()
+
+    if not parts and (step == 'stage' or step == 'prime'):
+        # If we've been asked to clean stage or prime without being given
+        # specific parts, just blow away those directories instead of
+        # doing it per part.
+        _cleanup_common_directories_for_step(
+            step, project_options, parts=config.all_parts)
+        return
 
     if parts:
         config.parts.validate(parts)

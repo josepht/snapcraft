@@ -14,9 +14,17 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from contextlib import contextmanager
 import os
 import shutil
+import subprocess
 import logging
+
+from snapcraft.internal.errors import (
+    RequiredCommandFailure,
+    RequiredCommandNotFound,
+    RequiredPathDoesNotExist,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -142,15 +150,55 @@ def _search_and_replace_contents(file_path, search_pattern, replacement):
     if os.path.islink(file_path):
         return
 
-    with open(file_path, 'r+') as f:
-        try:
-            original = f.read()
-        except UnicodeDecodeError:
-            # This was probably a binary file. Skip it.
-            return
+    try:
+        with open(file_path, 'r+') as f:
+            try:
+                original = f.read()
+            except UnicodeDecodeError:
+                # This was probably a binary file. Skip it.
+                return
 
-        replaced = search_pattern.sub(replacement, original)
-        if replaced != original:
-            f.seek(0)
-            f.truncate()
-            f.write(replaced)
+            replaced = search_pattern.sub(replacement, original)
+            if replaced != original:
+                f.seek(0)
+                f.truncate()
+                f.write(replaced)
+    except PermissionError as e:
+        logger.warning('Unable to open {path} for writing: {error}'.format(
+            path=file_path, error=e))
+
+
+def executable_exists(path):
+    """Return True if 'path' exists and is readable and executable."""
+    return os.path.exists(path) and os.access(path, os.R_OK | os.X_OK)
+
+
+@contextmanager
+def requires_command_success(command, not_found_fmt=None, failure_fmt=None):
+    if isinstance(command, str):
+        cmd_list = command.split()
+    else:
+        raise TypeError('command must be a string.')
+    kwargs = dict(command=command, cmd_list=cmd_list)
+    try:
+        subprocess.check_call(
+            cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        if not_found_fmt is not None:
+            kwargs['fmt'] = not_found_fmt
+        raise RequiredCommandNotFound(**kwargs)
+    except subprocess.CalledProcessError:
+        if failure_fmt is not None:
+            kwargs['fmt'] = failure_fmt
+        raise RequiredCommandFailure(**kwargs)
+    yield
+
+
+@contextmanager
+def requires_path_exists(path, error_fmt=None):
+    if not os.path.exists(path):
+        kwargs = dict(path=path)
+        if error_fmt is not None:
+            kwargs['fmt'] = error_fmt
+        raise RequiredPathDoesNotExist(**kwargs)
+    yield

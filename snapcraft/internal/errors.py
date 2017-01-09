@@ -39,6 +39,25 @@ class MissingState(Exception):
     pass
 
 
+class PrimeFileConflictError(SnapcraftError):
+
+    fmt = (
+        'The following files have been excluded by the `stage` keyword, '
+        'but included by the `prime` keyword: {fileset!r}'
+    )
+
+
+class DuplicateAliasError(SnapcraftError):
+
+    fmt = 'Multiple parts have the same alias defined: {aliases!r}'
+
+    def __str__(self):
+        if isinstance(self.aliases, (list, set)):
+            self.aliases = ','.join(self.aliases)
+
+        return super().__str__()
+
+
 class SnapcraftPartMissingError(SnapcraftError):
 
     fmt = (
@@ -71,15 +90,15 @@ class SnapcraftPartConflictError(SnapcraftError):
                          file_paths='\n'.join(sorted(spaced_conflict_files)))
 
 
-class MissingPackageError(SnapcraftError):
+class MissingCommandError(SnapcraftError):
 
     fmt = (
-        'One or more required packages are missing, please install:'
-        ' {required_packages!r}'
+        'One or more required commands are missing, please install:'
+        ' {required_commands!r}'
     )
 
-    def __init__(self, required_packages):
-        super().__init__(required_packages=required_packages)
+    def __init__(self, required_commands):
+        super().__init__(required_commands=required_commands)
 
 
 class InvalidWikiEntryError(SnapcraftError):
@@ -88,3 +107,27 @@ class InvalidWikiEntryError(SnapcraftError):
 
     def __init__(self, error=None):
         super().__init__(error=error)
+
+
+class MissingGadgetError(SnapcraftError):
+
+    fmt = (
+        'When creating gadget snaps you are required to provide a gadget.yaml file\n'  # noqa
+        'in the root of your snapcraft project\n\n'
+        'Read more about gadget snaps and the gadget.yaml on:\n'
+        'https://github.com/snapcore/snapd/wiki/Gadget-snap')
+
+
+class RequiredCommandFailure(SnapcraftError):
+
+    fmt = '{command!r} failed.'
+
+
+class RequiredCommandNotFound(SnapcraftError):
+
+    fmt = '{cmd_list[0]!r} not found.'
+
+
+class RequiredPathDoesNotExist(SnapcraftError):
+
+    fmt = 'Required path does not exist: {path!r}'

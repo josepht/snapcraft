@@ -16,31 +16,56 @@
 
 import logging
 import os
-from unittest import mock
+import stat
 
+from unittest import mock
 import fixtures
+import http.server
 import progressbar
+import threading
 import testscenarios
+import testtools
 
 from snapcraft.internal import common
-from snapcraft.tests import fixture_setup
+from snapcraft.tests import fake_servers, fixture_setup
+
+
+class ContainsList(list):
+
+        def __eq__(self, other):
+            return all([i[0] in i[1] for i in zip(self, other)])
 
 
 class MockOptions:
 
     def __init__(self, source=None, source_type=None, source_branch=None,
                  source_tag=None, source_subdir=None, source_depth=None,
-                 disable_parallel=False):
+                 source_commit=None, disable_parallel=False):
         self.source = source
         self.source_type = source_type
         self.source_depth = source_depth
         self.source_branch = source_branch
+        self.source_commit = source_commit
         self.source_tag = source_tag
         self.source_subdir = source_subdir
         self.disable_parallel = disable_parallel
 
 
-class TestCase(testscenarios.WithScenarios, fixtures.TestWithFixtures):
+class IsExecutable:
+    """Match if a file path is executable."""
+
+    def __str__(self):
+        return 'IsExecutable()'
+
+    def match(self, file_path):
+        if not os.stat(file_path).st_mode & stat.S_IEXEC:
+            return testtools.matchers.Mismatch(
+                'Expected {!r} to be executable, but it was not'.format(
+                    file_path))
+        return None
+
+
+class TestCase(testscenarios.WithScenarios, testtools.TestCase):
 
     def setUp(self):
         super().setUp()
@@ -48,6 +73,8 @@ class TestCase(testscenarios.WithScenarios, fixtures.TestWithFixtures):
         self.useFixture(temp_cwd_fixture)
         self.path = temp_cwd_fixture.path
         self.useFixture(fixture_setup.TempXDG(self.path))
+        self.fake_terminal = fixture_setup.FakeTerminal()
+        self.useFixture(self.fake_terminal)
         # Some tests will directly or indirectly change the plugindir, which
         # is a module variable. Make sure that it is returned to the original
         # value when a test ends.
@@ -72,7 +99,7 @@ class TestCase(testscenarios.WithScenarios, fixtures.TestWithFixtures):
         self.addCleanup(patcher.stop)
 
         # These are what we expect by default
-        self.snap_dir = os.path.join(os.getcwd(), 'prime')
+        self.prime_dir = os.path.join(os.getcwd(), 'prime')
         self.stage_dir = os.path.join(os.getcwd(), 'stage')
         self.parts_dir = os.path.join(os.getcwd(), 'parts')
         self.local_plugins_dir = os.path.join(self.parts_dir, 'plugins')
@@ -98,6 +125,22 @@ class TestWithFakeRemoteParts(TestCase):
     def setUp(self):
         super().setUp()
         self.useFixture(fixture_setup.FakeParts())
+
+
+class FakeFileHTTPServerBasedTestCase(TestCase):
+
+    def setUp(self):
+        super().setUp()
+
+        self.useFixture(fixtures.EnvironmentVariable(
+            'no_proxy', 'localhost,127.0.0.1'))
+        self.server = http.server.HTTPServer(
+            ('127.0.0.1', 0), fake_servers.FakeFileHTTPRequestHandler)
+        server_thread = threading.Thread(target=self.server.serve_forever)
+        self.addCleanup(server_thread.join)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        server_thread.start()
 
 
 class SilentProgressBar(progressbar.ProgressBar):

@@ -31,6 +31,8 @@ Usage:
   snapcraft [options] cleanbuild
   snapcraft [options] login
   snapcraft [options] logout
+  snapcraft [options] list-registered
+  snapcraft [options] registered
   snapcraft [options] list-keys
   snapcraft [options] keys
   snapcraft [options] create-key [<key-name>]
@@ -44,12 +46,14 @@ Usage:
   snapcraft [options] history <snap-name> [--series=<series>] [--arch=<arch>]
   snapcraft [options] close <snap-name> <channel_names>...
   snapcraft [options] list-plugins
+  snapcraft [options] plugins
   snapcraft [options] tour [<directory>]
   snapcraft [options] update
   snapcraft [options] gated <snap-name>
   snapcraft [options] validate <snap-name> <validation>... [--key-name=<key-name>]
   snapcraft [options] define <part-name>
   snapcraft [options] search [<query> ...]
+  snapcraft [options] enable-ci [<ci-system>] [--refresh]
   snapcraft [options] help (topics | <plugin> | <topic>) [--devel]
   snapcraft (-h | --help)
   snapcraft --version
@@ -91,8 +95,11 @@ The available commands are:
   help         Obtain help for a certain plugin or topic
   init         Initialize a snapcraft project.
   list-plugins List the available plugins that handle different types of part.
+  plugins      Alias for list-plugins.
   login        Authenticate session against Ubuntu One SSO.
   logout       Clear session credentials.
+  list-registered List snap names registered or shared with you.
+  registered   Alias for list-registered.
   list-keys    List keys available for signing snaps.
   keys         Alias for list-keys.
   create-key   Create a key pair for signing snaps.
@@ -108,6 +115,8 @@ The available commands are:
   status       Show the current status of a snap per channel and architecture.
   history      List all revisions of a snap.
   close        Close one or more channels of a snap.
+  enable-ci    EXPERIMENTAL enable continuous-integration systems to build and
+               release snaps to the Ubuntu Store.
 
 The available lifecycle commands are:
   clean        Remove content - cleans downloads, builds or install artifacts.
@@ -139,7 +148,6 @@ http://snapcraft.io/docs/build-snaps
 
 import logging
 import os
-import pkg_resources
 import pkgutil
 import shutil
 import sys
@@ -147,6 +155,7 @@ import sys
 from docopt import docopt
 
 import snapcraft
+from snapcraft.integrations import enable_ci
 from snapcraft.internal import lifecycle, log, parts
 from snapcraft.internal.common import (
     format_output_in_columns,
@@ -157,13 +166,6 @@ from snapcraft.storeapi.constants import DEFAULT_SERIES
 
 logger = logging.getLogger(__name__)
 _SNAPCRAFT_TOUR_DIR = "./snapcraft-tour/"
-
-
-def _get_version():
-    try:
-        return pkg_resources.require('snapcraft')[0].version
-    except pkg_resources.DistributionNotFound:
-        return 'devel'
 
 
 def _scaffold_examples(directory):
@@ -217,7 +219,7 @@ def _get_project_options(args):
 
 def main(argv=None):
     doc = __doc__.format(DEFAULT_SERIES=DEFAULT_SERIES)
-    args = docopt(doc, version=_get_version(), argv=argv)
+    args = docopt(doc, version=snapcraft.__version__, argv=argv)
 
     # Default log level is INFO unless --debug is specified
     log_level = logging.INFO
@@ -254,6 +256,7 @@ def _get_command_from_arg(args):
         'login': snapcraft.login,
         'logout': snapcraft.logout,
         'list-plugins': _list_plugins,
+        'plugins': _list_plugins,
     }
     function = [k for k in functions if args[k]]
     if len(function) == 0:
@@ -280,6 +283,8 @@ def run(args, project_options):  # noqa
     elif args['help']:
         snapcraft.topic_help(args['<topic>'] or args['<plugin>'],
                              args['--devel'], args['topics'])
+    elif args['enable-ci']:
+        enable_ci(args['<ci-system>'], args['--refresh'])
     elif args['update']:
         parts.update()
     elif args['define']:
@@ -303,16 +308,18 @@ def _run_clean(args, project_options):
 
 def _is_store_command(args):
     commands = (
-        'list-keys', 'keys', 'create-key', 'register-key', 'register',
-        'sign-build', 'upload', 'release', 'push', 'validate', 'gated',
-        'history', 'status', 'close')
+        'list-registered', 'registered', 'list-keys', 'keys', 'create-key',
+        'register-key', 'register', 'sign-build', 'upload', 'release',
+        'push', 'validate', 'gated', 'history', 'status', 'close')
     return any(args.get(command) for command in commands)
 
 
 # This function's complexity is correlated to the number of
 # commands, no point in checking that.
 def _run_store_command(args):  # noqa: C901
-    if args['list-keys'] or args['keys']:
+    if args['list-registered'] or args['registered']:
+        snapcraft.list_registered()
+    elif args['list-keys'] or args['keys']:
         snapcraft.list_keys()
     elif args['create-key']:
         snapcraft.create_key(args['<key-name>'])

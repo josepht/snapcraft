@@ -18,6 +18,12 @@
 """
 snapcraft-parser
 
+Parse a wiki index of parts and output formatted YAML for use by 'snapcraft'.
+'snapcraft' uses the YAML to find non-local parts referred to by a project's
+'snapcraft.yaml' file.  See 'snapcraft update' and 'snapcraft define' for more
+details.
+
+
 Usage:
   snapcraft-parser [options]
 
@@ -26,13 +32,14 @@ Options:
   -v --version                          show program version and exit
   -d --debug                            print debug information while executing
                                         (including backtraces)
-  -i --index=<filename>                 a file containing a part index.
+  -i --index=<filepath>                 a file containing a part index.
+                                        ({default_index!r})
   -o --output=<filename>                where to write the parsed parts list.
+                                        ({default_parts_file!r})
 """
 
 import logging
 import os
-import pkg_resources
 import re
 import urllib
 import yaml
@@ -41,7 +48,8 @@ from yaml.scanner import ScannerError
 from docopt import docopt
 from collections import OrderedDict
 
-from snapcraft.internal import log, sources
+import snapcraft
+from snapcraft.internal import log, repo, sources
 from snapcraft.internal.errors import SnapcraftError, InvalidWikiEntryError
 from snapcraft.internal.project_loader import replace_attr
 
@@ -58,8 +66,12 @@ logger = logging.getLogger(__name__)
 
 
 # TODO: make this a temporary directory that get's removed when finished
-BASE_DIR = "/tmp"
-PARTS_FILE = "snap-parts.yaml"
+BASE_DIR = os.getenv('TMPDIR', '/tmp')
+PARTS_FILE = 'snap-parts.yaml'
+DEFAULT_INDEX = 'http://wiki.ubuntu.com/snapcraft/parts?action=raw'
+
+__doc__ = __doc__.format(default_index=DEFAULT_INDEX,
+                         default_parts_file=PARTS_FILE)
 
 
 def _get_base_dir():
@@ -67,15 +79,8 @@ def _get_base_dir():
     return BASE_DIR
 
 
-def _get_version():
-    try:
-        return pkg_resources.require('snapcraft-parser')[0].version
-    except pkg_resources.DistributionNotFound:
-        return 'devel'
-
-
 def main(argv=None):
-    args = docopt(__doc__, version=_get_version(), argv=argv)
+    args = docopt(__doc__, version=snapcraft.__version__, argv=argv)
 
     # Default log level is INFO unless --debug is specified
     log_level = logging.INFO
@@ -178,6 +183,9 @@ def _process_entry(data):
 
     # Get optional wiki entry fields.
     origin_type = data.get('origin-type')
+    origin_branch = data.get('origin-branch')
+    origin_commit = data.get('origin-commit')
+    origin_tag = data.get('origin-tag')
 
     # Get required wiki entry fields.
     try:
@@ -188,19 +196,26 @@ def _process_entry(data):
     except KeyError as e:
         raise InvalidWikiEntryError('Missing key in wiki entry: {}'.format(e))
 
+    logger.info('Processing origin {origin!r}'.format(origin=origin))
     origin_dir = os.path.join(_get_base_dir(), _encode_origin(origin))
     os.makedirs(origin_dir, exist_ok=True)
 
-    class Options:
-        source = origin
-        source_type = origin_type
-
-    options = Options()
-    sources.get(origin_dir, None, options)
+    source_handler = sources.get_source_handler(origin,
+                                                source_type=origin_type)
+    handler = source_handler(origin, source_dir=origin_dir)
+    repo.check_for_command(handler.command)
+    handler.source_branch = origin_branch
+    handler.source_commit = origin_commit
+    handler.source_tag = origin_tag
+    handler.pull()
 
     try:
         origin_data = _get_origin_data(origin_dir)
-    except (BadSnapcraftYAMLError, MissingSnapcraftYAMLError) as e:
+    except MissingSnapcraftYAMLError:
+        raise InvalidWikiEntryError(
+            'Origin {origin!r} is missing a snapcraft.yaml file.'.format(
+                origin=origin))
+    except BadSnapcraftYAMLError as e:
         raise InvalidWikiEntryError('snapcraft.yaml error: {}'.format(e))
 
     origin_parts = origin_data.get('parts', {})
@@ -217,7 +232,9 @@ def _process_entry(data):
     return parts_list, after_parts
 
 
-def _process_wiki_entry(entry, master_parts_list):
+def _process_wiki_entry(
+        entry, master_parts_list, master_missing_parts,
+        pending_validation_entries):
     """Add valid wiki entries to the master parts list"""
     # return the number of errors encountered
     try:
@@ -239,14 +256,42 @@ def _process_wiki_entry(entry, master_parts_list):
 
     parts_list, after_parts = _process_entry(data)
 
-    if is_valid_parts_list(parts_list, after_parts):
+    known_parts = list(parts_list.keys()) + list(master_parts_list.keys())
+    missing_parts = missing_parts_set(after_parts, known_parts)
+
+    if not len(missing_parts):
         master_parts_list.update(parts_list)
+        master_missing_parts -= set(parts_list.keys())
+    else:
+        pending_validation_entries.append(entry)
+        master_missing_parts.update(missing_parts)
+        logger.debug('Parts {!r} are missing'.format(
+            ",".join(missing_parts)))
+
+
+def _try_process_entry(
+        entry, master_parts_list, missing_parts,
+        pending_validation_entries):
+    wiki_errors = 0
+
+    try:
+        _process_wiki_entry(
+            entry, master_parts_list, missing_parts,
+            pending_validation_entries)
+    except SnapcraftError as e:
+        logger.warning(e)
+        wiki_errors += 1
+
+    return wiki_errors
 
 
 def _process_index(output):
     # XXX: This can't remain in memory if the list gets very large, but it
     # should be okay for now.
     master_parts_list = OrderedDict()
+    pending_validation_entries = []
+    missing_parts = set()
+
     wiki_errors = 0
 
     output = output.replace(b'{{{', b'').replace(b'}}}', b'')
@@ -258,22 +303,25 @@ def _process_index(output):
     for line in output.decode().splitlines():
         if line == '---':
             if entry:
-                try:
-                    _process_wiki_entry(entry, master_parts_list)
-                except SnapcraftError as e:
-                    logger.warning(e)
-                    wiki_errors += 1
-
+                wiki_errors += _try_process_entry(
+                    entry, master_parts_list, missing_parts,
+                    pending_validation_entries)
                 entry = ''
         else:
             entry = '\n'.join([entry, line])
 
     if entry:
-        try:
-            _process_wiki_entry(entry, master_parts_list)
-        except SnapcraftError as e:
-            logger.warning(e)
-            wiki_errors += 1
+        wiki_errors += _try_process_entry(
+            entry, master_parts_list,  missing_parts,
+            pending_validation_entries)
+
+    for entry in pending_validation_entries:
+        wiki_errors += _try_process_entry(
+            entry, master_parts_list, missing_parts, [])
+
+    if len(missing_parts):
+        logger.warning('Parts {!r} are not defined in the parts entry'.format(
+                ",".join(missing_parts)))
 
     return {'master_parts_list': master_parts_list,
             'wiki_errors': wiki_errors}
@@ -285,14 +333,12 @@ def run(args):
         path = PARTS_FILE
 
     index = args.get('--index')
-    if index:
-        if '://' not in index:
-            index = '{}{}'.format(
-                'file://', os.path.join(os.getcwd(), index))
-        output = urllib.request.urlopen(index).read()
-    else:
-        # XXX: fetch the index from the wiki
-        output = b'{}'
+    if not index:
+        index = DEFAULT_INDEX
+    if '://' not in index:
+        index = '{}{}'.format(
+            'file://', os.path.join(os.getcwd(), index))
+    output = urllib.request.urlopen(index).read()
 
     data = _process_index(output)
     master_parts_list = data['master_parts_list']
@@ -309,18 +355,17 @@ def run(args):
     return wiki_errors
 
 
-def is_valid_parts_list(parts_list, parts):
+def missing_parts_set(parts, known_parts):
+    missing_parts = set()
     for partname in parts:
-        if partname not in parts_list.keys():
-            logging.error('Part {!r} is missing from the parts entry'.format(
-                partname))
-            return False
+        if partname not in known_parts:
+            missing_parts.add(partname)
 
-    return True
+    return missing_parts
 
 
 def _write_parts_list(path, master_parts_list):
-    logging.debug('Writing parts list to {!r}'.format(path))
+    logger.info('Writing parts list to {!r}'.format(path))
     with open(path, 'w') as fp:
         fp.write(yaml.dump(master_parts_list,
                  default_flow_style=False))

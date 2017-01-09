@@ -95,18 +95,19 @@ class CatkinPlugin(snapcraft.BasePlugin):
 
         schema['required'].append('catkin-packages')
 
+        return schema
+
+    @classmethod
+    def get_pull_properties(cls):
         # Inform Snapcraft of the properties associated with pulling. If these
         # change in the YAML Snapcraft will consider the pull step dirty.
-        schema['pull-properties'].extend(
-            ['rosdistro', 'catkin-packages', 'source-space',
-             'include-roscore'])
-
-        return schema
+        return ['rosdistro', 'catkin-packages', 'source-space',
+                'include-roscore']
 
     @property
     def PLUGIN_STAGE_SOURCES(self):
         return """
-deb http://packages.ros.org/ros/${{suffix}}/ {0} main
+deb http://packages.ros.org/ros/ubuntu/ {0} main
 deb http://${{prefix}}.ubuntu.com/${{suffix}}/ {0} main universe
 deb http://${{prefix}}.ubuntu.com/${{suffix}}/ {0}-updates main universe
 deb http://${{prefix}}.ubuntu.com/${{suffix}}/ {0}-security main universe
@@ -116,6 +117,8 @@ deb http://${{security}}.ubuntu.com/${{suffix}} {0}-security main universe
     def __init__(self, name, options, project):
         super().__init__(name, options, project)
         self.build_packages.extend(['gcc', 'libc6-dev', 'make'])
+
+        self.stage_packages.extend(['gcc', 'g++'])
 
         # Get a unique set of packages
         self.catkin_packages = set(options.catkin_packages)
@@ -444,12 +447,6 @@ def _find_system_dependencies(catkin_packages, rosdep):
                     "rosdep database.".format(dependency))
 
             system_dependencies[dependency] = these_dependencies
-
-            # TODO: Not sure why this isn't pulled in by roscpp. Can it
-            # be compiled by clang, etc.? If so, perhaps this should be
-            # left up to the developer.
-            if dependency == 'roscpp':
-                system_dependencies['g++'] = ['g++']
 
     # Finally, return a list of all system dependencies
     return set(item for sublist in system_dependencies.values()

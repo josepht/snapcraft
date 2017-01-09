@@ -17,6 +17,9 @@ contain.
 * `description` (string)
   The description for the snap, this can and is expected to be a longer
   explanation for the snap.
+* `icon` (string)
+  Relative path in the snap to an icon to represent the package. It should
+  be a 512x512 PNG or SVG file.
 * `confinement` (string)
   The type of confinement supported by the snap. Can be either "devmode" (i.e.
   this snap doesn't support running under confinement) or "strict" (i.e. full
@@ -60,17 +63,6 @@ contain.
       via `SIGTERM` (and `SIGKILL` if that doesn't work).
 * `icon` (string)
   Path to the icon that will be used for the snap.
-* `license` (string)
-  Path to a license file.
-* `license-agreement` (string)
-  Requires `license` to be set. The only valid value for this entry is
-  `explicit` which requires the license to be accepted for the snap to
-  install.
-  A good example for this one is the Sun JRE/JDK being bundled in a snap.
-* `license-version` (string)
-  Requires `license` to be set. The version for the license.
-  A change in version when `license-accept` is set to `explicit` requires
-  a license to be reaccepted.
 * `parts` (yaml subsection)
   A map of part names to their own part configuration. Order in the file is
   not relevant (to aid copy-and-pasting). Check out the
@@ -108,11 +100,20 @@ contain.
       applying to the list here are the same as those of filesets. Referencing
       of fileset keys is done with a $ prefixing the fileset key, which will
       expand with the value of such key.
-    * `snap` (list of strings)
+    * `prime` (list of strings)
       A list of files from a part's installation to expose in snap. Rules
       applying to the list here are the same as those of filesets. Referencing
       of fileset keys is done with a `$` prefixing the fileset key, which will
       expand with the value of such key.
+    * `build-attributes` (list of strings)
+      A list of special attributes that affect the build of this specific part.
+      Supported attributes:
+
+        - `no-system-libraries`:
+          Do not automatically copy required libraries from the system to
+          satisfy the dependencies of this part. This might be useful if one
+          knows these dependencies will be satisfied in other manner, e.g. via
+          content sharing from other snaps.
 
 The `snapcraft.yaml` in any project is validated to be compliant to these
 keywords, if there is any missing expected component or invalid value,

@@ -45,6 +45,7 @@ Additionally, this plugin uses the following plugin-specific keywords:
 import logging
 import os
 import shutil
+from glob import iglob
 
 import snapcraft
 from snapcraft import common
@@ -84,16 +85,19 @@ class GoPlugin(snapcraft.BasePlugin):
         if 'required' in schema:
             del schema['required']
 
-        # Inform Snapcraft of the properties associated with pulling. If these
-        # change in the YAML Snapcraft will consider the pull step dirty.
-        schema['pull-properties'].append('go-packages')
+        return schema
 
+    @classmethod
+    def get_build_properties(cls):
         # Inform Snapcraft of the properties associated with building. If these
         # change in the YAML Snapcraft will consider the build step dirty.
-        schema['build-properties'].extend(
-            ['source', 'go-packages', 'go-buildtags'])
+        return ['go-packages', 'go-buildtags']
 
-        return schema
+    @classmethod
+    def get_pull_properties(cls):
+        # Inform Snapcraft of the properties associated with pulling. If these
+        # change in the YAML Snapcraft will consider the pull step dirty.
+        return ['go-packages']
 
     def __init__(self, name, options, project):
         super().__init__(name, options, project)
@@ -111,7 +115,7 @@ class GoPlugin(snapcraft.BasePlugin):
         super().pull()
         os.makedirs(self._gopath_src, exist_ok=True)
 
-        if self.options.source:
+        if any(iglob('{}/**/*.go'.format(self.sourcedir), recursive=True)):
             go_package = self._get_local_go_package()
             go_package_path = os.path.join(self._gopath_src, go_package)
             if os.path.islink(go_package_path):
@@ -143,12 +147,13 @@ class GoPlugin(snapcraft.BasePlugin):
     def build(self):
         super().build()
 
+        tags = []
+        if self.options.go_buildtags:
+            tags = ['-tags={}'.format(','.join(self.options.go_buildtags))]
+
         for go_package in self.options.go_packages:
-            self._run(['go', 'install', go_package])
+            self._run(['go', 'install'] + tags + [go_package])
         if not self.options.go_packages:
-            tags = []
-            if self.options.go_buildtags:
-                tags = ['-tags={}'.format(','.join(self.options.go_buildtags))]
             self._run(['go', 'install'] + tags +
                       ['./{}/...'.format(self._get_local_go_package())])
 

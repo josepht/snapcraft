@@ -1,6 +1,6 @@
 # -*- Mode:Python; indent-tabs-mode:nil; tab-width:4 -*-
 #
-# Copyright (C) 2015, 2016 Canonical Ltd
+# Copyright (C) 2015, 2016, 2017 Canonical Ltd
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
@@ -24,8 +24,8 @@ Usage:
 Options:
   --skip-install       skip the tests that install the snaps into a
                        snapp test bed.
-  --ip IP_OR_HOSTNAME  IP of the testbed. If no IP is passed, a virtual
-                       machine will be created for the test.
+  --ip IP_OR_HOSTNAME  IP of the testbed. If no IP is passed, localhost will
+                       be used.
   --port PORT_NUMBER   SSH port of the testbed. Defaults to use port 22.
   --filter REGEXP      a regular expression to filter the snaps to test.
   --subunit            generate subunit results.
@@ -39,6 +39,8 @@ import sys
 
 import docopt
 
+import snapcraft
+
 import snaps_tests
 
 
@@ -47,7 +49,11 @@ def main():
 
     arguments = docopt.docopt(__doc__)
 
-    snaps_tests.config['skip-install'] = arguments['--skip-install']
+    if snapcraft.ProjectOptions().deb_arch == 'armhf':
+        # snaps can't yet be installed in a lxc container.
+        snaps_tests.config['skip-install'] = True
+    else:
+        snaps_tests.config['skip-install'] = arguments['--skip-install']
     snaps_tests.config['ip'] = arguments['--ip']
     snaps_tests.config['port'] = arguments['--port']
     snaps_tests.config['filter'] = arguments['--filter']

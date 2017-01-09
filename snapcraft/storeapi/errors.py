@@ -87,20 +87,45 @@ class StoreMacaroonNeedsRefreshError(StoreError):
     fmt = 'Authentication macaroon needs to be refreshed.'
 
 
+class DeveloperAgreementSignError(StoreError):
+
+    fmt = (
+        'There was an error while signing developer agreement.\n'
+        'Reason: {reason!r}\n'
+        'Text: {text!r}')
+
+    def __init__(self, response):
+        super().__init__(reason=response.reason, text=response.text)
+
+
+class NeedTermsSignedError(StoreError):
+
+    fmt = (
+        'Developer Terms of Service agreement must be signed '
+        'before continuing: {message}')
+
+    def __init__(self, message):
+        super().__init__(message=message)
+
+
 class StoreAccountInformationError(StoreError):
 
     fmt = 'Error fetching account information from store: {error}'
 
     def __init__(self, response):
         error = '{} {}'.format(response.status_code, response.reason)
+        extra = []
         try:
             response_json = response.json()
             if 'error_list' in response_json:
                 error = ' '.join(
                     error['message'] for error in response_json['error_list'])
+                extra = [
+                    error['extra'] for error in response_json[
+                        'error_list'] if 'extra' in error]
         except JSONDecodeError:
             pass
-        super().__init__(error=error)
+        super().__init__(error=error, extra=extra)
 
 
 class StoreKeyRegistrationError(StoreError):
@@ -127,6 +152,8 @@ class StoreRegistrationError(StoreError):
         'of most users. If you are the publisher most users expect for '
         '{snap_name!r} then claim the name at {register_name_url!r}')
 
+    __FMT_ALREADY_OWNED = 'You already own the name {snap_name!r}.'
+
     __FMT_RESERVED = (
         'The name {snap_name!r} is reserved.\n\n'
         'If you are the publisher most users expect for '
@@ -140,6 +167,7 @@ class StoreRegistrationError(StoreError):
 
     __error_messages = {
         'already_registered': __FMT_ALREADY_REGISTERED,
+        'already_owned': __FMT_ALREADY_OWNED,
         'reserved_name': __FMT_RESERVED,
         'register_window': __FMT_RETRY_WAIT,
     }
@@ -172,7 +200,9 @@ class StoreUploadError(StoreError):
 class StorePushError(StoreError):
 
     __FMT_NOT_REGISTERED = (
-        'Sorry, try `snapcraft register {snap_name}` before pushing again.')
+        'You are not the publisher or allowed to push revisions for this '
+        'snap. To become the publisher, run `snapcraft register {snap_name}` '
+        'and try to push again.')
 
     fmt = 'Received {status_code!r}: {text!r}'
 

@@ -1,4 +1,4 @@
-[![Build Status][travis-image]][travis-url] [![Coverage Status][coveralls-image]][coveralls-url]
+[![Build Status][travis-image]][travis-url] [![Coverage Status][codecov-image]][codecov-url]
 
 # Snapcraft
 
@@ -27,7 +27,7 @@ transactional update system.
 
 ## Get in touch
 
-We're friendly! Talk to us on [IRC](https://webchat.freenode.net/?channels=snappy)
+We're friendly! Talk to us on [Rocket Chat](https://rocket.ubuntu.com/channel/snapcraft)
 or on [our mailing list](https://lists.snapcraft.io/mailman/listinfo/snapcraft).
 
 Get news and stay up to date on [Twitter](https://twitter.com/snapcraftio),
@@ -37,7 +37,7 @@ Get news and stay up to date on [Twitter](https://twitter.com/snapcraftio),
 [travis-image]: https://travis-ci.org/snapcore/snapcraft.svg?branch=master
 [travis-url]: https://travis-ci.org/snapcore/snapcraft
 
-[coveralls-image]: https://coveralls.io/repos/snapcore/snapcraft/badge.svg?branch=master&service=github
-[coveralls-url]: https://coveralls.io/github/snapcore/snapcraft?branch=master
+[codecov-image]: https://codecov.io/github/snapcore/snapcraft/coverage.svg?branch=master
+[codecov-url]: https://codecov.io/github/snapcore/snapcraft?branch=master
 
 [overview-image]: https://rawgit.com/snapcore/snapcraft/master/docs/images/snapcraft_overview.svg

@@ -38,6 +38,17 @@ class BaseHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         logger.debug(args)
 
 
+class FakeFileHTTPRequestHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        data = 'Test fake compressed file'
+        self.send_response(200)
+        self.send_header('Content-Length', len(data))
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(data.encode())
+
+
 class FakePartsServer(http.server.HTTPServer):
 
     def __init__(self, server_address):
@@ -323,9 +334,7 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
     _DEV_API_PATH = '/dev/api/'
 
     def do_POST(self):
-        if self.server.fake_store.needs_refresh:
-            self._handle_needs_refresh()
-            return
+        self._handle_refresh()
         parsed_path = urllib.parse.urlparse(self.path)
         acl_path = urllib.parse.urljoin(self._DEV_API_PATH, 'acl/')
         account_key_path = urllib.parse.urljoin(
@@ -338,6 +347,8 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
             self._DEV_API_PATH, 'snap-push/')
         release_path = urllib.parse.urljoin(
             self._DEV_API_PATH, 'snap-release/')
+        agreement_path = urllib.parse.urljoin(
+            self._DEV_API_PATH, 'agreement/')
 
         if parsed_path.path.startswith(acl_path):
             permission = parsed_path.path[len(acl_path):].strip('/')
@@ -355,11 +366,18 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
             self._handle_upload_request()
         elif parsed_path.path.startswith(release_path):
             self._handle_release_request()
+        elif parsed_path.path.startswith(agreement_path):
+            self._handle_sign_request()
         else:
             logger.error(
                 'Not implemented path in fake Store API server: {}'.format(
                     self.path))
             raise NotImplementedError(self.path)
+
+    def _handle_refresh(self):
+        if self.server.fake_store.needs_refresh:
+            self._handle_needs_refresh()
+            return
 
     def _handle_needs_refresh(self):
         self.send_response(401)
@@ -543,20 +561,23 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
         logger.debug(
             'Handling registration request with content {}'.format(data))
         snap_name = data['snap_name']
+        is_private = data['is_private']
 
         if data['snap_name'] == 'test-already-registered-snap-name':
             self._handle_register_409('already_registered')
         elif data['snap_name'] == 'test-reserved-snap-name':
             self._handle_register_409('reserved_name')
+        elif data['snap_name'] == 'test-already-owned-snap-name':
+            self._handle_register_409('already_owned')
         elif data['snap_name'].startswith('test-too-fast'):
             self._handle_register_429('register_window')
         elif data['snap_name'] == 'snap-name-no-clear-error':
             self._handle_unclear_registration_error()
         else:
-            self._handle_successful_registration(snap_name)
+            self._handle_successful_registration(snap_name, is_private)
 
-    def _handle_successful_registration(self, name):
-        self.server.registered_names.append(name)
+    def _handle_successful_registration(self, name, is_private):
+        self.server.registered_names.append((name, is_private))
         self.send_response(201)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -669,6 +690,42 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
 
         self.wfile.write(data)
 
+    def _handle_sign_request(self):
+        string_data = self.rfile.read(
+            int(self.headers['Content-Length'])).decode('utf8')
+        data = json.loads(string_data)
+
+        if 'STORE_DOWN' in os.environ:
+            response_code = 500
+            content_type = 'text/plain'
+            response = b'Broken'
+        else:
+            if data['latest_tos_accepted'] is not True:
+                response_code = 400
+                content_type = 'application/json'
+                content = {
+                    "error_list": [{
+                        "message": "`latest_tos_accepted` must be `true`",
+                        "code": "bad-request",
+                        "extra": {"latest_tos_accepted": "true"}}]}
+                response = json.dumps(content).encode()
+            else:
+                response_code = 200
+                content_type = 'application/json'
+                content = {"content": {
+                    "latest_tos_accepted": True,
+                    "tos_url": 'http://fake-url.com',
+                    "latest_tos_date": '2000-01-01',
+                    "accepted_tos_date": '2010-10-10'
+                    }
+                }
+                response = json.dumps(content).encode()
+
+        self.send_response(response_code)
+        self.send_header('Content-Type', content_type)
+        self.end_headers()
+        self.wfile.write(response)
+
     # This function's complexity is correlated to the number of
     # url paths, no point in checking that.
     def do_GET(self):  # noqa: C901
@@ -729,7 +786,8 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
                 "snap-id": "snap-id-gating",
                 "timestamp": "2016-09-19T21:07:27.756001Z",
                 "type": "validation",
-                "revoked": "false"
+                "revoked": "false",
+                "required": True,
             }, {
                 "approved-snap-id": "snap-id-2",
                 "approved-snap-revision": "5",
@@ -740,7 +798,20 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
                 "snap-id": "snap-id-gating",
                 "timestamp": "2016-09-19T21:07:27.756001Z",
                 "type": "validation",
-                "revoked": "false"
+                "revoked": "false",
+                "required": False,
+            }, {
+                "approved-snap-id": "snap-id-3",
+                "approved-snap-revision": "-",
+                "approved-snap-name": "snap-3",
+                "authority-id": "dev-1",
+                "series": "16",
+                "sign-key-sha3-384": "1234567890",
+                "snap-id": "snap-id-gating",
+                "timestamp": "2016-09-19T21:07:27.756001Z",
+                "type": "validation",
+                "revoked": "false",
+                "required": True,
             }]
             response = json.dumps(response).encode()
             status = 200
@@ -779,12 +850,18 @@ class FakeStoreAPIRequestHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         snaps = {
-            'basic': {'snap-id': 'snap-id'},
-            'ubuntu-core': {'snap-id': 'good'},
+            'basic': {'snap-id': 'snap-id', 'status': 'Approved',
+                      'private': False, 'price': None,
+                      'since': '2016-12-12T01:01:01Z'},
+            'ubuntu-core': {'snap-id': 'good', 'status': 'Approved',
+                            'private': False, 'price': None,
+                            'since': '2016-12-12T01:01:01Z'},
             }
         snaps.update({
-            n: {'snap-id': 'fake-snap-id'}
-            for n in self.server.registered_names})
+            name: {'snap-id': 'fake-snap-id', 'status': 'Approved',
+                   'private': private, 'price': None,
+                   'since': '2016-12-12T01:01:01Z'}
+            for name, private in self.server.registered_names})
         self.wfile.write(json.dumps({
             'account_id': 'abcd',
             'account_keys': self.server.account_keys,
@@ -966,18 +1043,28 @@ class FakeStoreSearchRequestHandler(BaseHTTPRequestHandler):
 
     def _get_details_response(self, package):
         # ubuntu-core is used in integration tests with fake servers.
+
+        # sha512sum snapcraft/tests/data/test-snap.snap
+        test_sha512 = (
+            '69d57dcacf4f126592d4e6ff689ad8bb8a083c7b9fe44f6e738ef'
+            'd22a956457f14146f7f067b47bd976cf0292f2993ad864ccb498b'
+            'fda4128234e4c201f28fe9')
+
         if package in ('test-snap', 'ubuntu-core'):
-            # sha512sum snapcraft/tests/data/test-snap.snap
-            sha512 = (
-                '69d57dcacf4f126592d4e6ff689ad8bb8a083c7b9fe44f6e738ef'
-                'd22a956457f14146f7f067b47bd976cf0292f2993ad864ccb498b'
-                'fda4128234e4c201f28fe9')
+            sha512 = test_sha512
         elif package == 'test-snap-with-wrong-sha':
             sha512 = 'wrong sha'
+        elif package == 'test-snap-branded-store':
+            # Branded-store snaps require Store pinning and authorization.
+            if (self.headers.get('X-Ubuntu-Store') != 'Test-Branded' or
+                    self.headers.get('Authorization') is None):
+                return None
+            sha512 = test_sha512
         else:
             return None
+
         response = {
-            'download_url': urllib.parse.urljoin(
+            'anon_download_url': urllib.parse.urljoin(
                 'http://localhost:{}'.format(self.server.server_port),
                 'download-snap/test-snap.snap'),
             'download_sha512': sha512,

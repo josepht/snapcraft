@@ -19,6 +19,7 @@ import datetime
 import getpass
 import json
 import logging
+import operator
 import os
 import re
 import subprocess
@@ -30,7 +31,10 @@ from tabulate import tabulate
 import yaml
 
 from snapcraft import storeapi
-from snapcraft.internal import repo
+from snapcraft.internal import (
+    cache,
+    repo,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -50,28 +54,88 @@ def _get_data_from_snap_file(snap_path):
     return snap_yaml
 
 
-def _login(store, acls=None, save=True):
+def _fail_login(msg=''):
+    logger.info(msg)
+    logger.info('Login failed.')
+    return False
+
+
+def _get_url_from_error(error):
+    if error.extra:
+        return error.extra[0].get('url')
+    return None
+
+
+def _check_dev_agreement_and_namespace_statuses(store):
+    """ Check the agreement and namespace statuses of the dev.
+    Fail if either of those conditions is not met.
+    Re-raise `StoreAccountInformationError` if we get an error and
+    the error is not either of these.
+    """
+    # Check account information for the `developer agreement` status.
+    try:
+        store.get_account_information()
+    except storeapi.errors.StoreAccountInformationError as e:
+        if storeapi.constants.MISSING_AGREEMENT == e.error:
+            # A precaution if store does not return new style error.
+            url = (_get_url_from_error(e) or
+                   storeapi.constants.UBUNTU_STORE_TOS_URL)
+            choice = input(
+                storeapi.constants.AGREEMENT_INPUT_MSG.format(url))
+            if choice == 'y':
+                try:
+                    store.sign_developer_agreement(latest_tos_accepted=True)
+                except:
+                    raise storeapi.errors.NeedTermsSignedError(
+                            storeapi.constants.AGREEMENT_SIGN_ERROR.format(
+                                url))
+            else:
+                raise storeapi.errors.NeedTermsSignedError(
+                            storeapi.constants.AGREEMENT_ERROR)
+
+    # Now check account information for the `namespace` status.
+    try:
+        store.get_account_information()
+    except storeapi.errors.StoreAccountInformationError as e:
+        if storeapi.constants.MISSING_NAMESPACE in e.error:
+            # A precaution if store does not return new style error.
+            url = (_get_url_from_error(e) or
+                   storeapi.constants.UBUNTU_STORE_ACCOUNT_URL)
+            raise storeapi.errors.NeedTermsSignedError(
+                    storeapi.constants.NAMESPACE_ERROR.format(url))
+        else:
+            raise
+
+
+def _login(store, packages=None, acls=None, channels=None, save=True):
     print('Enter your Ubuntu One SSO credentials.')
     email = input('Email: ')
     password = getpass.getpass('Password: ')
 
     try:
         try:
-            store.login(email, password, acls=acls, save=save)
+            store.login(email, password, packages=packages, acls=acls,
+                        channels=channels, save=save)
             print()
-            logger.info(
-                'We strongly recommend enabling multi-factor authentication: '
-                'https://help.ubuntu.com/community/SSO/FAQs/2FA')
+            logger.info(storeapi.constants.TWO_FACTOR_WARNING)
         except storeapi.errors.StoreTwoFactorAuthenticationRequired:
             one_time_password = input('Second-factor auth: ')
             store.login(
                 email, password, one_time_password=one_time_password,
-                acls=acls, save=save)
-    except (storeapi.errors.InvalidCredentialsError,
-            storeapi.errors.StoreAuthenticationError):
-        print()
-        logger.info('Login failed.')
-        return False
+                acls=acls, packages=packages, channels=channels,
+                save=save)
+
+        # Continue if agreement and namespace conditions are met.
+        _check_dev_agreement_and_namespace_statuses(store)
+
+    except storeapi.errors.InvalidCredentialsError:
+        return _fail_login(storeapi.constants.INVALID_CREDENTIALS)
+    except storeapi.errors.StoreAuthenticationError:
+        return _fail_login(storeapi.constants.AUTHENTICATION_ERROR)
+    except storeapi.errors.StoreAccountInformationError:
+        return _fail_login(storeapi.constants.ACCOUNT_INFORMATION_ERROR)
+    except storeapi.errors.NeedTermsSignedError as e:
+        return _fail_login(e.message)
     else:
         print()
         logger.info('Login successful.')
@@ -98,6 +162,32 @@ def _requires_login():
         logger.error('No valid credentials found.'
                      ' Have you run "snapcraft login"?')
         raise
+
+
+def list_registered():
+    series = storeapi.constants.DEFAULT_SERIES
+
+    store = storeapi.StoreClient()
+    with _requires_login():
+        account_info = store.get_account_information()
+    snaps = [
+        (name, info['since'], 'private' if info['private'] else 'public',
+         info['price'] or '-', '-')
+        for name, info in account_info['snaps'].get(series, {}).items()
+        # Presenting only approved snap registrations, which means name
+        # disputes will be displayed/sorted some other way.
+        if info['status'] == 'Approved'
+    ]
+
+    if not snaps:
+        print('There are no registered snaps for series {!r}.'.format(series))
+        return
+
+    tabulated_snaps = tabulate(
+        sorted(snaps, key=operator.itemgetter(0)),
+        headers=['Name', 'Since', 'Visibility', 'Price', 'Notes'],
+        tablefmt='plain')
+    print(tabulated_snaps)
 
 
 def _get_usable_keys(name=None):
@@ -319,11 +409,14 @@ def push(snap_filename, release_channels=None):
         raise FileNotFoundError(
             'The file {!r} does not exist.'.format(snap_filename))
 
-    logger.info('Uploading {}.'.format(snap_filename))
-
     snap_yaml = _get_data_from_snap_file(snap_filename)
     snap_name = snap_yaml['name']
     store = storeapi.StoreClient()
+
+    logger.info('Pushing {!r} to the store.'.format(snap_filename))
+    with _requires_login():
+        store.push_precheck(snap_name)
+
     with _requires_login():
         tracker = store.upload(snap_name, snap_filename)
 
@@ -335,6 +428,11 @@ def push(snap_filename, release_channels=None):
     else:
         logger.info('Uploaded {!r}'.format(snap_name))
     tracker.raise_for_code()
+
+    if os.environ.get('DELTA_UPLOADS_EXPERIMENTAL'):
+        snap_cache = cache.SnapCache(project_name=snap_name)
+        snap_cache.cache(snap_filename, result['revision'])
+        snap_cache.prune(keep_revision=result['revision'])
 
     if release_channels:
         release(snap_name, result['revision'], release_channels)
@@ -441,7 +539,6 @@ def download(snap_name, channel, download_path, arch):
     """Download snap from the store to download_path"""
     store = storeapi.StoreClient()
     try:
-        with _requires_login():
             store.download(snap_name, channel, download_path, arch)
     except storeapi.errors.SHAMismatchError:
         raise RuntimeError(
@@ -502,10 +599,19 @@ def gated(snap_name):
     if validations:
         table_data = []
         for v in validations:
-            table_data.append([v['approved-snap-name'],
-                               v['approved-snap-revision']])
-        tabulated = tabulate(table_data, headers=['Name', 'Approved'],
-                             tablefmt="plain")
+            name = v['approved-snap-name']
+            revision = v['approved-snap-revision']
+            if revision == '-':
+                revision = None
+            required = str(v.get('required', True))
+            # Currently timestamps have microseconds, which look bad
+            timestamp = v['timestamp']
+            if '.' in timestamp:
+                timestamp = timestamp.split('.')[0] + 'Z'
+            table_data.append([name, revision, required, timestamp])
+        tabulated = tabulate(
+            table_data, headers=['Name', 'Revision', 'Required', 'Approved'],
+            tablefmt="plain", missingval='-')
         print(tabulated)
     else:
         print('There are no validations for snap {!r}'.format(snap_name))

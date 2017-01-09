@@ -49,6 +49,7 @@ properties:
     description: the snap type, the implicit type is 'app'
     enum:
       - app
+      - gadget
       - kernel
       - os
   frameworks:
@@ -57,21 +58,12 @@ properties:
     uniqueItems: true
     items:
       - type: string
-  license:
-    type: string
-    description: path to a license file.
-  license-agreement:
-    type: string
-    description: action to take on licensing.
-    enum:
-      - explicit
-  license-version:
-    description: license version (used to re-trigger an agreement action).
   confinement:
     type: string
     description: the type of confinement supported by the snap
     default: strict
     enum:
+      - classic
       - devmode
       - strict
   grade:
@@ -96,6 +88,9 @@ properties:
           stop-command: ["daemon"]
         additionalProperties: false
         properties:
+          desktop:
+            type: string
+            description: path to a desktop file representing the app, relative to the prime directory
           command:
             type: string
             description: command executed to run the binary
@@ -111,6 +106,7 @@ properties:
               - simple
               - forking
               - oneshot
+              - notify
           restart-condition:
               type: string
               enum:
@@ -132,25 +128,68 @@ properties:
             uniqueItems: true
             items:
               type: string
+          aliases:
+            type: array
+            uniqueItems: true
+            items:
+              type: string
+              pattern: "^[a-zA-Z0-9][-_.a-zA-Z0-9]*$"
+  hooks:
+    type: object
+    additionalProperties: false
+    patternProperties:
+      "^[a-zA-Z0-9](?:-?[a-zA-Z0-9])*$":
+        type: object
+        additionalProperties: false
+        properties:
+          plugs:
+            type: array
+            minitems: 1
+            uniqueItems: true
+            items:
+              type: string
   parts:
     type: object
     minProperties: 1
     additionalProperties: false
     patternProperties:
       ^(?!plugins$)[a-z0-9][a-z0-9+-\/]*$:
+        # Make sure snap/prime are mutually exclusive
+        allOf:
+          - not:
+              type: object
+              required: [snap, prime]
+              validation-failure: "{.instance} cannot contain both 'snap' and 'prime' keywords."
         type: object
         minProperties: 1
         properties:
           plugin:
             type: string
             description: plugin name
-          stage-packages:
-            type: array
-            description: Ubuntu packages used to support the part.
-            minItems: 1
-            uniqueItems: true
-            items:
-              type: string
+          source:
+            type: string
+            default: '.'
+          source-branch:
+            type: string
+            default: ''
+          source-commit:
+            type: string
+            default: ''
+          source-depth:
+            type: integer
+            default: 0
+          source-subdir:
+            type: string
+            default: ''
+          source-tag:
+            type: string
+            default: ''
+          source-type:
+            type: string
+            default: ''
+          disable-parallel:
+            type: boolean
+            default: false
           after:
             type: array
             minitems: 1
@@ -172,10 +211,19 @@ properties:
             items:
               type: string
             default: []
+          build-attributes:
+            type: array
+            minitems: 1
+            uniqueItems: true
+            items:
+              type: string
+            default: []
           organize:
             type: object
+            default: {}
           filesets:
             type: object
+            default: {}
           stage:
             type: array
             minitems: 1
@@ -183,13 +231,29 @@ properties:
             items:
               type: string
             default: ['*']
-          snap:
+          snap: # FIXME: This is deprecated, replaced by `prime`, below.
             type: array
             minitems: 1
             uniqueItems: true
             items:
               type: string
             default: ['*']
+          prime:
+            type: array
+            minitems: 1
+            uniqueItems: true
+            items:
+              type: string
+            default: ['*']
+          install:
+            type: string
+            default: ''
+          build:
+            type: string
+            default: ''
+          prepare:
+            type: string
+            default: ''
   plugs:
     type: object
   slots:

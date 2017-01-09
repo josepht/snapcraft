@@ -17,7 +17,9 @@
 from functools import partial
 import io
 import os
+import sys
 import threading
+from types import ModuleType
 import urllib.parse
 from unittest import mock
 
@@ -56,6 +58,11 @@ class TempXDG(fixtures.Fixture):
             new=os.path.join(self.path, '.local'))
         patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = mock.patch(
+            'xdg.BaseDirectory.xdg_cache_home',
+            new=os.path.join(self.path, '.cache'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         patcher_dirs = mock.patch(
             'xdg.BaseDirectory.xdg_config_dirs',
@@ -88,6 +95,13 @@ class _FakeStdout(io.StringIO):
         return 1
 
 
+class _FakeStderr(io.StringIO):
+    """A fake stderr using StringIO implementing the missing fileno attrib."""
+
+    def fileno(self):
+        return 2
+
+
 class _FakeTerminalSize:
 
     def __init__(self, columns=80):
@@ -110,13 +124,20 @@ class FakeTerminal(fixtures.Fixture):
         self.mock_stdout = patcher.start()
         self.addCleanup(patcher.stop)
 
+        patcher = mock.patch('sys.stderr', new_callable=_FakeStderr)
+        self.mock_stderr = patcher.start()
+        self.addCleanup(patcher.stop)
+
         patcher = mock.patch('os.isatty')
         mock_isatty = patcher.start()
         mock_isatty.return_value = self.isatty
         self.addCleanup(patcher.stop)
 
-    def getvalue(self):
-        return self.mock_stdout.getvalue()
+    def getvalue(self, stderr=False):
+        if stderr:
+            return self.mock_stderr.getvalue()
+        else:
+            return self.mock_stdout.getvalue()
 
 
 class FakePartsWiki(fixtures.Fixture):
@@ -299,6 +320,7 @@ class TestStore(fixtures.Fixture):
             self.useFixture(FakeStore())
             self.register_delay = 0
             self.reserved_snap_name = 'test-reserved-snap-name'
+            self.already_owned_snap_name = 'test-already-owned-snap-name'
         elif test_store == 'staging':
             self.useFixture(StagingStore())
             self.register_delay = 10
@@ -317,3 +339,30 @@ class TestStore(fixtures.Fixture):
             self.user_password = 'test correct password'
         else:
             self.user_password = os.getenv('TEST_USER_PASSWORD')
+
+
+class DeltaUploads(fixtures.Fixture):
+    """Enable the Delta Uploads Experimental flag."""
+    def setUp(self):
+        super().setUp()
+        self.useFixture(fixtures.EnvironmentVariable(
+            'DELTA_UPLOADS_EXPERIMENTAL', 'True'))
+
+
+class FakePlugin(fixtures.Fixture):
+    '''Dynamically generate a new module containing the provided plugin'''
+
+    def __init__(self, plugin_name, plugin_class):
+        super().__init__()
+        self._import_name = 'snapcraft.plugins.{}'.format(
+            plugin_name.replace('-', '_'))
+        self._plugin_class = plugin_class
+
+    def _setUp(self):
+        plugin_module = ModuleType(self._import_name)
+        setattr(plugin_module, self._plugin_class.__name__, self._plugin_class)
+        sys.modules[self._import_name] = plugin_module
+        self.addCleanup(self._remove_module)
+
+    def _remove_module(self):
+        del sys.modules[self._import_name]
