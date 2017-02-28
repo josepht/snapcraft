@@ -28,6 +28,7 @@ import tempfile
 
 from subprocess import Popen
 
+import dateutil.parser
 from tabulate import tabulate
 import yaml
 
@@ -704,6 +705,11 @@ def _get_text_for_current_channels(channels, current_channels):
         for channel in channels) or '-'
 
 
+def _friendly_datetime(datetime_str):
+    dt = dateutil.parser.parse(datetime_str)
+    return datetime.datetime.strftime(dt, '%c')
+
+
 def revisions(snap_name, series, arch):
     store = storeapi.StoreClient()
 
@@ -711,7 +717,8 @@ def revisions(snap_name, series, arch):
         revisions = store.get_snap_revisions(snap_name, series, arch)
 
     parsed_revisions = [
-        (rev['revision'], rev['timestamp'], rev['arch'], rev['version'],
+        (rev['revision'], _friendly_datetime(rev['timestamp']),
+         rev['arch'], rev['version'],
          _get_text_for_current_channels(
             rev['channels'], rev['current_channels']))
         for rev in revisions]
