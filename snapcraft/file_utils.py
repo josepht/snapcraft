@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from contextlib import contextmanager
+import glob
 import hashlib
 import logging
 import os
@@ -51,6 +52,24 @@ def replace_in_file(directory, file_pattern, search_pattern, replacement):
             if file_pattern.match(file_name):
                 _search_and_replace_contents(os.path.join(root, file_name),
                                              search_pattern, replacement)
+
+
+def link_or_copy_glob(source, destination, follow_symlinks=False):
+    """Hard-link source and destination files. Copy if it fails to link."""
+
+    pattern = os.path.split(source)[-1]
+    sources = glob.glob(source)
+    for source in sources:
+        if os.path.isdir(source):
+            dest = destination
+            # handle wildcards
+            if pattern == '*':
+                dir_name = os.path.split(source)[-1]
+                dest = os.path.join(destination, dir_name)
+            link_or_copy_tree(source, dest)
+        else:  # a file
+            link_or_copy(source, destination,
+                         follow_symlinks=follow_symlinks)
 
 
 def link_or_copy(source, destination, follow_symlinks=False):
@@ -92,7 +111,7 @@ def link_or_copy(source, destination, follow_symlinks=False):
 
 def link_or_copy_tree(source_tree, destination_tree,
                       copy_function=link_or_copy):
-    """Copy a source tree into a destination, hard-linking if possile.
+    """Copy a source tree into a destination, hard-linking if possible.
 
     :param str source_tree: Source directory to be copied.
     :param str destination_tree: Destination directory. If this directory
